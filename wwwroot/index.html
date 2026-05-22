@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Dungeons of Skara Brae</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div id="layout">
+    <div id="terminal-pane"><div id="terminal"></div></div>
+    <div id="splitter" title="Drag to resize"></div>
+    <div id="editor-pane">
+      <div id="editor-header">
+        <button id="editor-knot-name" type="button">—</button>
+        <span id="editor-dirty"></span>
+      </div>
+      <div id="editor"></div>
+    </div>
+  </div>
+
+  <div id="picker" class="picker-hidden">
+    <div id="picker-list"></div>
+  </div>
+
+  <div id="modal-backdrop">
+    <div id="modal" role="dialog" aria-modal="true">
+      <h3 id="modal-title">Unsaved changes</h3>
+      <div id="modal-prompt"></div>
+      <div id="modal-buttons">
+        <button data-choice="never">Never Save</button>
+        <button data-choice="dont">Don't Save</button>
+        <button data-choice="always">Always Save</button>
+        <button data-choice="save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="/app.js"></script>
+  <script src="/editor.js"></script>
+</body>
+</html>
