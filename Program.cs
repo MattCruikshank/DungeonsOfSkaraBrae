@@ -4,7 +4,8 @@ using DungeonsOfSkaraBrae.Ink;
 var builder = WebApplication.CreateBuilder(args);
 
 var storyRoot = Path.Combine(builder.Environment.ContentRootPath, "Story");
-var inklecatePath = Path.Combine(builder.Environment.ContentRootPath, "tools", "inklecate.exe");
+var inklecateBin = OperatingSystem.IsWindows() ? "inklecate.exe" : "inklecate";
+var inklecatePath = Path.Combine(builder.Environment.ContentRootPath, "tools", inklecateBin);
 
 builder.Services.AddSingleton(_ => new InkCompiler(inklecatePath, storyRoot));
 builder.Services.AddSingleton<CompiledStorySource>();

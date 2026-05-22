@@ -10,14 +10,14 @@ A C# ASP.NET Core dev tool for authoring [Ink](https://www.inklestudios.com/ink/
 
 ## Setup
 
-```powershell
-# 1. Fetch the inklecate compiler + runtime DLLs (one-time).
-pwsh tools/fetch-inklecate.ps1
+```bash
+# 1. Fetch the inklecate compiler + runtime DLLs for your OS (one-time).
+#    Windows / macOS / Linux all supported.
+pwsh tools/fetch-inklecate.ps1     # if you have PowerShell installed
+# or
+./tools/fetch-inklecate.sh         # Linux / macOS / Git Bash
 
-# 2. Build.
-dotnet build
-
-# 3. Run.
+# 2. Build and run.
 dotnet run
 ```
 
