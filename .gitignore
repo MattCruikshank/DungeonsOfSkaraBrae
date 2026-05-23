@@ -488,3 +488,5 @@ Story/.build/
 tools/inklecate.exe
 tools/ink-engine-runtime.dll
 tools/ink_compiler.dll
+tools/esbuild
+tools/esbuild.exe

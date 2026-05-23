@@ -29,5 +29,24 @@ if (-not $IsWindows -and ($PSVersionTable.PSVersion.Major -ge 6)) {
     if (Test-Path $bin) { chmod +x $bin }
 }
 
-Get-ChildItem $toolsDir | Where-Object { $_.Name -match '\.(exe|dll)$' -or $_.Name -eq 'inklecate' } | Select-Object Name, Length
+# ── esbuild (for transpiling Game/*.ts combat scripts) ──────────────────────
+$esbuildVersion = '0.28.0'
+if ($IsWindows -or ($PSVersionTable.PSVersion.Major -lt 6)) {
+    $pkg = 'win32-x64'; $binInPkg = 'package/esbuild.exe'; $binOut = 'esbuild.exe'
+} elseif ($IsMacOS) {
+    $arch = if ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
+    $pkg = "darwin-$arch"; $binInPkg = 'package/bin/esbuild'; $binOut = 'esbuild'
+} else {
+    $pkg = 'linux-x64'; $binInPkg = 'package/bin/esbuild'; $binOut = 'esbuild'
+}
+$tgz = Join-Path $toolsDir "esbuild-$pkg.tgz"
+Write-Host "Downloading esbuild $esbuildVersion ($pkg)"
+Invoke-WebRequest -Uri "https://registry.npmjs.org/@esbuild/$pkg/-/$pkg-$esbuildVersion.tgz" -OutFile $tgz
+tar -xzf $tgz -C $toolsDir $binInPkg
+Move-Item -Force (Join-Path $toolsDir $binInPkg) (Join-Path $toolsDir $binOut)
+Remove-Item -Recurse -Force (Join-Path $toolsDir 'package')
+Remove-Item $tgz
+if (-not $IsWindows -and ($PSVersionTable.PSVersion.Major -ge 6)) { chmod +x (Join-Path $toolsDir $binOut) }
+
+Get-ChildItem $toolsDir | Where-Object { $_.Name -match '\.(exe|dll)$' -or $_.Name -in @('inklecate', 'esbuild') } | Select-Object Name, Length
 Write-Host "Done."

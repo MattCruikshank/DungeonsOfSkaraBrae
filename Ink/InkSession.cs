@@ -12,6 +12,7 @@ public sealed class InkSession
     private readonly WebSocket _socket;
     private readonly CompiledStorySource _source;
     private readonly ILogger _logger;
+    private readonly CombatRunner _combat;
     private readonly Channel<SessionEvent> _events = Channel.CreateUnbounded<SessionEvent>(new UnboundedChannelOptions { SingleReader = true });
 
     private InkStory? _story;
@@ -19,13 +20,18 @@ public sealed class InkSession
     private string? _currentKnot;
     private IDisposable? _subscription;
 
+    private bool _combatRequested;
+    private bool _inCombat;
+    private string? _combatResolveKnot;
+
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = null };
 
-    public InkSession(WebSocket socket, CompiledStorySource source, ILogger logger)
+    public InkSession(WebSocket socket, CompiledStorySource source, ILogger logger, CombatRunner combat)
     {
         _socket = socket;
         _source = source;
         _logger = logger;
+        _combat = combat;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -34,21 +40,52 @@ public sealed class InkSession
         if (first is null) return;
 
         _currentCompiled = first;
-        _story = new InkStory(first.Json);
+        _story = BuildStory(first.Json);
         _subscription = _source.Subscribe(r => _events.Writer.TryWrite(new ReloadEvent(r)));
 
-        await EmitKnotIfChangedAsync(force: true, ct);
-        await DrainAndEmitAsync(ct);
-
         var receiveTask = ReceiveLoopAsync(ct);
-        var processTask = ProcessLoopAsync(ct);
 
-        await Task.WhenAny(receiveTask, processTask);
+        try
+        {
+            await DrainAndEmitAsync(ct);
+            while (_socket.State == WebSocketState.Open && !ct.IsCancellationRequested)
+            {
+                var choice = await ReadNextChoiceAsync(ct);
+                if (choice < 0) break; // channel completed → disconnect
+                if (_story is not null && choice < _story.currentChoices.Count)
+                {
+                    _story.ChooseChoiceIndex(choice);
+                    await DrainAndEmitAsync(ct);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Session loop error");
+            await SafeSendWarnAsync(AnsiRenderer.Warning($"(session error: {ex.Message})"), ct);
+        }
+        finally
+        {
+            _subscription?.Dispose();
+            _events.Writer.TryComplete();
+            try { await receiveTask; } catch { }
+        }
+    }
 
-        _subscription?.Dispose();
-        _events.Writer.TryComplete();
-        try { await receiveTask; } catch { }
-        try { await processTask; } catch { }
+    private InkStory BuildStory(string json)
+    {
+        var story = new InkStory(json);
+        // combat(resolveKnot): defer to the host combat loop, then divert to
+        // `resolveKnot` once the fight resolves. The divert is what makes Ink
+        // evaluate combat_won AFTER combat instead of racing ahead past the call.
+        story.BindExternalFunction<string>("combat", resolveKnot =>
+        {
+            _combatRequested = true;
+            _combatResolveKnot = resolveKnot;
+            return 0;
+        }, lookaheadSafe: false);
+        return story;
     }
 
     private async Task<CompiledStory?> WaitForFirstCompiledStoryAsync(CancellationToken ct)
@@ -110,38 +147,29 @@ public sealed class InkSession
                 _logger.LogWarning(ex, "Bad client message: {Text}", text);
             }
         }
+        _events.Writer.TryComplete();
     }
 
-    private async Task ProcessLoopAsync(CancellationToken ct)
+    /// Single consumer of the event channel. Returns the next player choice index,
+    /// handling hot-reload events inline along the way. Returns -1 if the channel
+    /// completes (disconnect). Reload events are ignored while combat is active.
+    private async Task<int> ReadNextChoiceAsync(CancellationToken ct)
     {
         await foreach (var ev in _events.Reader.ReadAllAsync(ct))
         {
-            try
+            switch (ev)
             {
-                switch (ev)
-                {
-                    case ChooseEvent choose:
-                        await HandleChooseAsync(choose.Index, ct);
-                        break;
-                    case ReloadEvent reload:
-                        await HandleReloadAsync(reload.Result, ct);
-                        break;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Session loop error");
-                await SafeSendWarnAsync(AnsiRenderer.Warning($"(session error: {ex.Message})"), ct);
+                case ChooseEvent c:
+                    return c.Index;
+                case ReloadEvent r when !_inCombat:
+                    await HandleReloadAsync(r.Result, ct);
+                    break;
+                case ReloadEvent:
+                    // mid-combat: skip; recompiled story will be picked up after the fight
+                    break;
             }
         }
-    }
-
-    private async Task HandleChooseAsync(int index, CancellationToken ct)
-    {
-        if (_story is null) return;
-        if (index < 0 || index >= _story.currentChoices.Count) return;
-        _story.ChooseChoiceIndex(index);
-        await DrainAndEmitAsync(ct);
+        return -1;
     }
 
     private async Task HandleReloadAsync(CompilationResult result, CancellationToken ct)
@@ -154,7 +182,7 @@ public sealed class InkSession
 
         try
         {
-            var fresh = new InkStory(result.Story!.Json);
+            var fresh = BuildStory(result.Story!.Json);
             foreach (var (name, value) in varSnapshot)
             {
                 try { fresh.variablesState[name] = value; } catch { /* var removed or type changed; ignore */ }
@@ -186,14 +214,20 @@ public sealed class InkSession
             var tags = _story.currentTags;
             if (text.Length > 0 || (tags is not null && tags.Count > 0))
             {
-                await SendAsync(new { type = "text", ansi = AnsiRenderer.Line(text, tags) }, ct);
+                await SendTextAsync(AnsiRenderer.Line(text, tags), ct);
             }
             await EmitKnotIfChangedAsync(force: false, ct);
+
+            if (_combatRequested)
+            {
+                _combatRequested = false;
+                await RunCombatAsync(ct);
+            }
         }
 
         if (_story.currentChoices.Count > 0)
         {
-            await EmitChoicesAsync(ct);
+            await SendChoicesAsync(_story.currentChoices.Select(c => c.text).ToList(), ct);
         }
         else
         {
@@ -201,15 +235,64 @@ public sealed class InkSession
         }
     }
 
-    private async Task EmitChoicesAsync(CancellationToken ct)
+    private async Task RunCombatAsync(CancellationToken ct)
     {
         if (_story is null) return;
-        var items = new List<object>();
-        for (var i = 0; i < _story.currentChoices.Count; i++)
+        _inCombat = true;
+        try
         {
-            items.Add(new { i, text = _story.currentChoices[i].text });
+            var hp = GetIntVar("player_hp", 20);
+            var result = await _combat.RunAsync(
+                sendText: s => SendTextAsync(s, ct),
+                sendChoices: items => SendChoicesAsync(items, ct),
+                readChoice: () => ReadNextChoiceAsync(ct),
+                playerHp: hp,
+                ct);
+            SetVar("player_hp", result.PlayerHp);
+            SetVar("combat_won", result.Won);
         }
-        await SendAsync(new { type = "choices", items }, ct);
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Combat error");
+            await SafeSendWarnAsync(AnsiRenderer.Warning($"(combat error: {ex.Message})"), ct);
+            SetVar("combat_won", false);
+        }
+        finally
+        {
+            _inCombat = false;
+            var resolve = _combatResolveKnot;
+            _combatResolveKnot = null;
+            if (!string.IsNullOrEmpty(resolve) && _currentCompiled?.KnotToFile.ContainsKey(resolve.Split('.')[0]) == true)
+            {
+                try { _story!.ChoosePathString(resolve); }
+                catch (Exception ex) { _logger.LogError(ex, "combat resolve divert failed for {Knot}", resolve); }
+            }
+        }
+    }
+
+    private int GetIntVar(string name, int fallback)
+    {
+        try
+        {
+            var v = _story!.variablesState[name];
+            return v is null ? fallback : Convert.ToInt32(v);
+        }
+        catch { return fallback; }
+    }
+
+    private void SetVar(string name, object value)
+    {
+        try { _story!.variablesState[name] = value; } catch { /* var not declared in ink; ignore */ }
+    }
+
+    private Task SendTextAsync(string ansiLine, CancellationToken ct)
+        => SendAsync(new { type = "text", ansi = ansiLine }, ct);
+
+    private Task SendChoicesAsync(IReadOnlyList<string> texts, CancellationToken ct)
+    {
+        var items = new List<object>(texts.Count);
+        for (var i = 0; i < texts.Count; i++) items.Add(new { i, text = texts[i] });
+        return SendAsync(new { type = "choices", items }, ct);
     }
 
     private async Task EmitKnotIfChangedAsync(bool force, CancellationToken ct)

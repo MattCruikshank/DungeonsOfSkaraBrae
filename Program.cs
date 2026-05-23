@@ -6,8 +6,12 @@ var builder = WebApplication.CreateBuilder(args);
 var storyRoot = Path.Combine(builder.Environment.ContentRootPath, "Story");
 var inklecateBin = OperatingSystem.IsWindows() ? "inklecate.exe" : "inklecate";
 var inklecatePath = Path.Combine(builder.Environment.ContentRootPath, "tools", inklecateBin);
+var esbuildBin = OperatingSystem.IsWindows() ? "esbuild.exe" : "esbuild";
+var esbuildPath = Path.Combine(builder.Environment.ContentRootPath, "tools", esbuildBin);
+var combatTsPath = Path.Combine(builder.Environment.ContentRootPath, "Game", "combat.ts");
 
 builder.Services.AddSingleton(_ => new InkCompiler(inklecatePath, storyRoot));
+builder.Services.AddSingleton(_ => new CombatRunner(esbuildPath, combatTsPath));
 builder.Services.AddSingleton<CompiledStorySource>();
 builder.Services.AddSingleton<StoryWatcher>(sp => new StoryWatcher(
     sp.GetRequiredService<InkCompiler>(),
@@ -34,7 +38,7 @@ app.MapGet("/api/status", (CompiledStorySource src) =>
     });
 });
 
-app.Map("/ws", async (HttpContext ctx, CompiledStorySource src, ILoggerFactory lf) =>
+app.Map("/ws", async (HttpContext ctx, CompiledStorySource src, CombatRunner combat, ILoggerFactory lf) =>
 {
     if (!ctx.WebSockets.IsWebSocketRequest)
     {
@@ -42,7 +46,7 @@ app.Map("/ws", async (HttpContext ctx, CompiledStorySource src, ILoggerFactory l
         return;
     }
     using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
-    var session = new InkSession(ws, src, lf.CreateLogger<InkSession>());
+    var session = new InkSession(ws, src, lf.CreateLogger<InkSession>(), combat);
     try { await session.RunAsync(ctx.RequestAborted); }
     catch (OperationCanceledException) { }
 });
